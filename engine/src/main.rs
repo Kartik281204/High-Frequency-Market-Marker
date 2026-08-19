@@ -1,3 +1,4 @@
+mod bench;
 mod ipc;
 mod market_sim;
 mod orderbook;
@@ -36,6 +37,17 @@ fn ticks_to_price(t: Price) -> f64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    let bench_n: Option<u64> = args
+        .iter()
+        .position(|a| a == "--bench")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok());
+    if let Some(n) = bench_n {
+        bench::run(n);
+        return;
+    }
+
     let duration_secs: Option<u64> = args
         .iter()
         .position(|a| a == "--duration")

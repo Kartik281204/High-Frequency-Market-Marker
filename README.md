@@ -121,6 +121,43 @@ Verified by asserting the ground-truth book is never crossed
 shadow book's *reported* top-of-book against that same invariant from the
 outside — which is how the first two flawed designs were actually caught.
 
+### Latency benchmark
+
+`./mm_engine --bench <n>` runs the ring buffer in isolation (no UDP, no
+simulation, no OS-scheduled sleeps) and reports two numbers, not one, and the
+distinction between them is itself worth understanding:
+
+```
+cross-thread publish -> consume latency (producer thread A, consumer thread B):
+  min:      175398 ns   mean:  283030 ns   p50:  281691 ns
+  p99:      364331 ns   p99.9: 425382 ns   max:  712725 ns
+
+single-threaded push+pop round-trip cost (200000 iterations, no second thread involved):
+  min:          27 ns   mean:      32 ns   p50:      31 ns
+  p99:          34 ns   p99.9:     48 ns   max:   22365 ns
+```
+
+(Real output, this sandbox, 5,000,000 messages, ~14.5M msgs/sec throughput.)
+
+The two numbers tell different stories. The single-threaded round-trip
+(push immediately followed by pop, same thread, no handoff) isolates the
+ring buffer's own mechanical cost — an atomic load, an atomic store, a
+small fixed-size copy — and it's genuinely nanosecond-scale, as a lock-free
+SPSC queue should be. The cross-thread number is ~9,000x higher, and the
+benchmark's own output tells you why: `nproc` in this sandbox returns **1**.
+With only one core, two threads that both want to run are fundamentally
+taking turns, not running in parallel, and the "latency" mostly measures how
+long thread B waits for the OS scheduler to deschedule thread A — not the
+ring buffer. The benchmark detects this (`std::thread::available_parallelism()`)
+and switches from spin-waiting to yielding accordingly, because spinning
+against yourself on a single core is actively counterproductive, not just
+imprecise. On genuine multi-core hardware, expect the cross-thread number to
+converge toward the single-threaded one (still not implementation-specific
+HFT-grade colocated-hardware numbers — see
+[Limitations](#limitations--what-a-real-system-would-add) — but a real
+measurement of real parallelism instead of an artifact of contending for
+one CPU).
+
 ## The quoting model
 
 Avellaneda & Stoikov (2008), *"High-frequency trading in a limit order
@@ -200,7 +237,8 @@ together.
 `cargo test` runs 25 unit tests, including the concurrent ring-buffer stress
 test and the order-book matching/crossing tests. Set `MM_ASSERT_INVARIANTS=1`
 when running the engine to enable a permanent, cheap runtime check that the
-ground-truth book is never crossed.
+ground-truth book is never crossed. Run `./target/release/mm_engine --bench
+1000000` for the ring-buffer latency/throughput benchmark described above.
 
 ## Limitations — what a real system would add
 
@@ -212,8 +250,17 @@ gap between them is real and worth naming directly:
   no real L3 data feed (which would come from the exchange directly or a
   paid vendor). This project's UDP layer *demonstrates the pattern*, not
   wire-speed performance — it's JSON over loopback UDP, not a binary
-  encoding like SBE, and there is no throughput/latency benchmark harness
-  here (a natural next addition, since the ring buffer already supports one).
+  encoding like SBE.
+- **The benchmark measures this sandbox, not tuned hardware — and this
+  sandbox turned out to have exactly one CPU core.** That's not a caveat
+  buried in fine print; it's the actual reason the cross-thread latency
+  number is microseconds instead of nanoseconds (see the benchmark section
+  above for the full explanation and the single-threaded number that isolates
+  the ring buffer's real cost from that artifact). On real multi-core,
+  colocated, tuned hardware, expect the cross-thread number to approach the
+  single-threaded one, not match some external "HFT-grade" figure — that
+  additionally requires kernel bypass, CPU pinning/isolation, and NIC-level
+  timestamping this project doesn't attempt.
 - **Simplified fill model.** Background liquidity and noise-trader flow are
   calibrated stochastic processes, not a queue-position model. Real LOB
   queue-position modeling — estimating your probability of fill *given where
@@ -241,6 +288,7 @@ engine/           Rust workspace
     types.rs       shared types: Side, Order, Fill, MarketEvent (L3), SeqEvent, StrategyCommand
     orderbook.rs    price-time-priority book + matching (ground truth AND shadow-book replay)
     ringbuffer.rs   lock-free SPSC ring buffer (Disruptor pattern)
+    bench.rs        isolated latency/throughput benchmark for the ring buffer
     market_sim.rs   matching engine thread: price process, background liquidity, UDP feed sender
     udp_feed.rs     feed handler thread: UDP receiver, sequence-gap detection
     quoting.rs      Avellaneda-Stoikov model + real-time volatility estimator
